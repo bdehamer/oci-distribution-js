@@ -1,0 +1,82 @@
+# Publishes the `oci-distribution` package to npm.
+#
+# Trigger: a published GitHub Release (primary), or a manual dispatch (fallback
+# for re-runs). Publishing uses npm Trusted Publishing over OIDC — there is no
+# long-lived NPM_TOKEN — and generates a signed provenance attestation.
+#
+# One-time setup on npmjs.com: configure this repository + workflow as a Trusted
+# Publisher for the package (Package settings → Publishing access → Trusted
+# publisher), and add required reviewers to the `npm-publish` environment.
+#
+# Hardening note: consider pinning the actions below to full-length commit SHAs
+# (e.g. via Dependabot) instead of major-version tags.
+name: Release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to publish (e.g. v0.1.0)"
+        required: true
+
+# Never publish the same version twice concurrently.
+concurrency:
+  group: release-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    environment:
+      name: npm-publish
+      url: https://www.npmjs.com/package/oci-distribution
+    permissions:
+      contents: read # checkout
+      id-token: write # OIDC for npm Trusted Publishing + provenance
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+          cache: npm
+
+      # Trusted Publishing requires npm >= 11.5.1; ensure a new enough CLI.
+      - name: Update npm
+        run: npm install --global npm@latest
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify package version matches the release tag
+        run: |
+          TAG="${{ github.event.release.tag_name || inputs.tag }}"
+          VERSION="v$(node -p "require('./package.json').version")"
+          if [ "$TAG" != "$VERSION" ]; then
+            echo "::error::Release tag ($TAG) does not match package.json version ($VERSION)."
+            exit 1
+          fi
+
+      - name: Type-check
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      # `npm publish` runs `prepack` (clean + build) automatically. Provenance
+      # and public access come from package.json "publishConfig". No token is
+      # supplied: npm mints a short-lived credential via OIDC.
+      - name: Publish
+        run: npm publish
