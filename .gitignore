@@ -6,3 +6,6 @@ coverage/
 .DS_Store
 .env
 .env.*
+
+# Local-only adapter package; not part of the published library or repo.
+adapters/
