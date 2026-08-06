@@ -4,7 +4,14 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Buffer } from "node:buffer";
-import { dockerConfigCredential, type HelperResult } from "../src/auth/docker-config.ts";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
+import { Registry } from "../src/registry.ts";
+import {
+  dockerConfigCredential,
+  dockerConfigHeaders,
+  type HelperResult,
+} from "../src/auth/docker-config.ts";
 
 function writeConfig(contents: unknown): string {
   const dir = mkdtempSync(join(tmpdir(), "oci-docker-"));
@@ -75,4 +82,67 @@ test("resolves config path from DOCKER_CONFIG env", async () => {
 test("missing config yields anonymous access", async () => {
   const provider = dockerConfigCredential({ configPath: "/nonexistent/config.json" });
   assert.deepEqual(await provider("ghcr.io"), {});
+});
+
+// --- HttpHeaders support ---
+
+test("dockerConfigHeaders reads the top-level HttpHeaders map", () => {
+  const dir = mkdtempSync(join(tmpdir(), "oci-docker-"));
+  writeFileSync(
+    join(dir, "config.json"),
+    JSON.stringify({ HttpHeaders: { "X-Meta-Header": "abc", "User-Agent": "custom/1.0" } }),
+  );
+  try {
+    assert.deepEqual(dockerConfigHeaders({ configPath: join(dir, "config.json") }), {
+      "X-Meta-Header": "abc",
+      "User-Agent": "custom/1.0",
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("dockerConfigHeaders returns {} when absent or file is missing", () => {
+  const dir = mkdtempSync(join(tmpdir(), "oci-docker-"));
+  writeFileSync(join(dir, "config.json"), JSON.stringify({ auths: {} }));
+  try {
+    assert.deepEqual(dockerConfigHeaders({ configPath: join(dir, "config.json") }), {});
+    assert.deepEqual(dockerConfigHeaders({ configPath: "/nonexistent/config.json" }), {});
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("dockerConfigHeaders resolves the config via DOCKER_CONFIG env", () => {
+  const dir = mkdtempSync(join(tmpdir(), "oci-docker-"));
+  writeFileSync(join(dir, "config.json"), JSON.stringify({ HttpHeaders: { "X-Proxy": "1" } }));
+  try {
+    assert.deepEqual(dockerConfigHeaders({ env: { DOCKER_CONFIG: dir } }), { "X-Proxy": "1" });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("HttpHeaders from the docker config are sent to the registry host", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "oci-docker-"));
+  writeFileSync(join(dir, "config.json"), JSON.stringify({ HttpHeaders: { "X-Custom-Auth": "sekret" } }));
+  const received: Array<Record<string, string | string[] | undefined>> = [];
+  const server = createServer((req, res) => {
+    received.push(req.headers);
+    res.statusCode = 200;
+    res.end();
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as AddressInfo;
+  try {
+    const registry = new Registry(`127.0.0.1:${port}`, {
+      headers: dockerConfigHeaders({ configPath: join(dir, "config.json") }),
+    });
+    await registry.ping();
+    assert.ok(received.length > 0, "registry should have received a request");
+    assert.equal(received[0]?.["x-custom-auth"], "sekret");
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((e) => (e ? reject(e) : resolve())));
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

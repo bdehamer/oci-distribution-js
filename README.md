@@ -75,6 +75,20 @@ const registry = new Registry("ghcr.io", {
 });
 ```
 
+Some registries and proxies also require custom HTTP headers (the Docker config's
+top-level `HttpHeaders`). Read them with `dockerConfigHeaders()` and pass them as
+`headers` — they are scoped to the registry host and never sent to a host named
+by a server response:
+
+```ts
+import { Registry, dockerConfigCredential, dockerConfigHeaders } from "oci-distribution";
+
+const registry = new Registry("ghcr.io", {
+  credentials: dockerConfigCredential(),
+  headers: dockerConfigHeaders(),
+});
+```
+
 ### Combining sources
 
 ```ts

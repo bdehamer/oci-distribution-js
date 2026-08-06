@@ -109,7 +109,9 @@ export {
 } from "./auth/credentials.ts";
 export {
   dockerConfigCredential,
+  dockerConfigHeaders,
   type DockerConfigOptions,
+  type DockerConfigHeadersOptions,
   type HelperResult,
   type HelperRunner,
 } from "./auth/docker-config.ts";

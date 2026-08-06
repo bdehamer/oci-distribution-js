@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
@@ -59,6 +60,37 @@ export function dockerConfigCredential(options: DockerConfigOptions = {}): Crede
   };
 }
 
+/**
+ * Reads the top-level `HttpHeaders` map from the Docker configuration file
+ * (`~/.docker/config.json` by default, or `$DOCKER_CONFIG/config.json`).
+ *
+ * Some registries and proxies require custom HTTP headers to authenticate. Pass
+ * the result as the `headers` option to a {@link Registry}, where the headers
+ * are scoped to the registry's own host (and never sent to a host named by a
+ * server response). Returns an empty object when the file is missing,
+ * unparseable, or has no `HttpHeaders`.
+ *
+ * @example
+ * new Registry("ghcr.io", {
+ *   credentials: dockerConfigCredential(),
+ *   headers: dockerConfigHeaders(),
+ * });
+ */
+export function dockerConfigHeaders(
+  options: DockerConfigHeadersOptions = {},
+): Record<string, string> {
+  const configPath = options.configPath ?? defaultConfigPath(options.env ?? process.env);
+  return loadConfigSync(configPath)?.HttpHeaders ?? {};
+}
+
+/** Options for {@link dockerConfigHeaders}. */
+export interface DockerConfigHeadersOptions {
+  /** Explicit path to the config file. Overrides env-based resolution. */
+  configPath?: string;
+  /** Environment used for `$DOCKER_CONFIG` / `$HOME` resolution. */
+  env?: NodeJS.ProcessEnv;
+}
+
 /** Options for {@link dockerConfigCredential}. */
 export interface DockerConfigOptions {
   /** Explicit path to the config file. Overrides env-based resolution. */
@@ -83,6 +115,7 @@ interface DockerConfig {
   auths?: Record<string, AuthEntry>;
   credHelpers?: Record<string, string>;
   credsStore?: string;
+  HttpHeaders?: Record<string, string>;
 }
 
 interface AuthEntry {
@@ -104,6 +137,25 @@ async function loadConfig(path: string): Promise<DockerConfig | undefined> {
   let text: string;
   try {
     text = await readFile(path, "utf8");
+  } catch {
+    return undefined;
+  }
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    if (typeof parsed === "object" && parsed !== null) {
+      return parsed as DockerConfig;
+    }
+  } catch {
+    // fall through
+  }
+  return undefined;
+}
+
+/** Synchronous variant of {@link loadConfig}, for reading static config values. */
+function loadConfigSync(path: string): DockerConfig | undefined {
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
   } catch {
     return undefined;
   }
