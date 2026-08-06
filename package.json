@@ -1,0 +1,46 @@
+{
+  "name": "oci-distribution",
+  "version": "0.1.0",
+  "description": "A zero-dependency TypeScript client for the OCI Distribution Specification.",
+  "keywords": [
+    "oci",
+    "registry",
+    "distribution",
+    "container",
+    "docker",
+    "artifact",
+    "oras"
+  ],
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": "^22.22.2 || ^24.15.0 || >=26.0.0"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node --test",
+    "test:watch": "node --test --watch",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "prepack": "npm run clean && npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^7.0.0"
+  }
+}
