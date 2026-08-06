@@ -49,6 +49,13 @@ export interface AuthClientOptions {
 export interface DoOptions {
   /** Scope hints used to pre-authenticate and to widen the requested token. */
   scopes?: string[];
+  /**
+   * When `false`, the request is sent without attaching or negotiating any
+   * credentials. Used for requests to hosts named by a server response (e.g. a
+   * blob-upload `Location` on a separate storage host), which must never
+   * receive registry credentials.
+   */
+  authenticate?: boolean;
 }
 
 interface BearerToken {
@@ -102,9 +109,16 @@ export class AuthClient {
       headers.set("user-agent", this.#userAgent);
     }
 
+    // Unauthenticated request: send as-is, never attaching credentials. Used for
+    // requests to hosts named by a server response (e.g. a cross-host blob
+    // upload location) that must not receive registry credentials.
+    if (options.authenticate === false) {
+      return this.#send(url, { ...init, headers });
+    }
+
     // Respect a caller-provided Authorization header.
     if (headers.has("authorization")) {
-      return this.#fetch(url, { ...init, headers });
+      return this.#send(url, { ...init, headers });
     }
 
     // Attach cached credentials to avoid a challenge round-trip.
@@ -123,7 +137,7 @@ export class AuthClient {
       }
     }
 
-    const response = await this.#fetch(url, { ...init, headers });
+    const response = await this.#send(url, { ...init, headers });
     if (response.status !== 401) {
       return response;
     }
@@ -152,7 +166,7 @@ export class AuthClient {
       const token = encodeBasicAuth(cred.username, cred.password);
       this.#cache.setScheme(host, "basic");
       this.#cache.setToken(host, "basic", "", token);
-      return this.#fetch(url, { ...init, headers: withAuth(headers, `Basic ${token}`) });
+      return this.#send(url, { ...init, headers: withAuth(headers, `Basic ${token}`) });
     }
 
     // Bearer
@@ -169,7 +183,7 @@ export class AuthClient {
       const cached = this.#cache.getToken(host, "bearer", key);
       if (cached) {
         await drain(response);
-        const retried = await this.#fetch(url, { ...init, headers: withAuth(headers, `Bearer ${cached}`) });
+        const retried = await this.#send(url, { ...init, headers: withAuth(headers, `Bearer ${cached}`) });
         if (retried.status !== 401) {
           return retried;
         }
@@ -177,7 +191,7 @@ export class AuthClient {
         const fresh = await this.#fetchBearerToken(realm, service, allScopes, cred);
         this.#cache.setScheme(host, "bearer");
         this.#cache.setToken(host, "bearer", key, fresh.token, fresh.expiresAt);
-        return this.#fetch(url, { ...init, headers: withAuth(headers, `Bearer ${fresh.token}`) });
+        return this.#send(url, { ...init, headers: withAuth(headers, `Bearer ${fresh.token}`) });
       }
     }
 
@@ -185,7 +199,75 @@ export class AuthClient {
     const fresh = await this.#fetchBearerToken(realm, service, allScopes, cred);
     this.#cache.setScheme(host, "bearer");
     this.#cache.setToken(host, "bearer", key, fresh.token, fresh.expiresAt);
-    return this.#fetch(url, { ...init, headers: withAuth(headers, `Bearer ${fresh.token}`) });
+    return this.#send(url, { ...init, headers: withAuth(headers, `Bearer ${fresh.token}`) });
+  }
+
+  /**
+   * Sends a request, following redirects manually and origin-safely. On a
+   * redirect that changes origin, all credential-bearing and non-safelisted
+   * headers are stripped before the next hop (and stay stripped for the rest of
+   * the chain), so credentials are never sent to a host reached via a
+   * server-controlled `Location`. Node's `fetch` strips `Authorization` on
+   * cross-origin redirects but not custom headers or request bodies, so this
+   * handling is done explicitly.
+   */
+  async #send(
+    url: string,
+    init: RequestInit,
+    options: { refuseCrossOriginRedirect?: boolean } = {},
+  ): Promise<Response> {
+    const originalOrigin = new URL(url).origin;
+    let current = url;
+    let method = init.method ?? "GET";
+    let body = init.body ?? undefined;
+    const headers = new Headers(init.headers);
+    let crossedOrigin = false;
+
+    for (let redirects = 0; ; redirects++) {
+      const sameOrigin = !crossedOrigin && new URL(current).origin === originalOrigin;
+      const hopHeaders = sameOrigin ? headers : safelistHeaders(headers);
+
+      const response = await this.#fetch(current, {
+        ...init,
+        method,
+        body,
+        headers: hopHeaders,
+        redirect: "manual",
+      });
+
+      if (!isRedirectStatus(response.status)) {
+        return response;
+      }
+      if (redirects >= MAX_REDIRECTS) {
+        await drain(response);
+        throw new RegistryError(`exceeded ${MAX_REDIRECTS} redirects starting at ${url}`);
+      }
+      const location = response.headers.get("location");
+      if (!location) {
+        return response; // malformed redirect; let the caller observe it
+      }
+      const next = new URL(location, current);
+      if (next.origin !== originalOrigin) {
+        if (options.refuseCrossOriginRedirect) {
+          await drain(response);
+          throw new RegistryError(
+            `refusing to follow cross-origin redirect to ${next.origin}`,
+          );
+        }
+        crossedOrigin = true;
+      }
+      await drain(response);
+
+      // RFC 9110 method/body rewriting.
+      if (response.status === 303 && method !== "GET" && method !== "HEAD") {
+        method = "GET";
+        body = undefined;
+      } else if ((response.status === 301 || response.status === 302) && method === "POST") {
+        method = "GET";
+        body = undefined;
+      }
+      current = next.href;
+    }
   }
 
   async #fetchBearerToken(
@@ -225,7 +307,11 @@ export class AuthClient {
       headers.set("authorization", `Basic ${encodeBasicAuth(cred.username ?? "", cred.password ?? "")}`);
     }
 
-    const response = await this.#fetch(url.toString(), { method: "GET", headers });
+    const response = await this.#send(
+      url.toString(),
+      { method: "GET", headers },
+      { refuseCrossOriginRedirect: true },
+    );
     if (!response.ok) {
       throw await ResponseError.fromResponse(response, "GET", url.toString());
     }
@@ -269,7 +355,11 @@ export class AuthClient {
       headers.set("user-agent", this.#userAgent);
     }
 
-    const response = await this.#fetch(realm, { method: "POST", headers, body: form.toString() });
+    const response = await this.#send(
+      realm,
+      { method: "POST", headers, body: form.toString() },
+      { refuseCrossOriginRedirect: true },
+    );
     if (!response.ok) {
       // Registries lacking OAuth2 support answer 404/405/501; retry via GET.
       if (response.status === 404 || response.status === 405 || response.status === 501) {
@@ -291,6 +381,38 @@ function withAuth(base: Headers, authorization: string): Headers {
   const headers = new Headers(base);
   headers.set("authorization", authorization);
   return headers;
+}
+
+/** Maximum number of redirects followed by {@link AuthClient} per request. */
+const MAX_REDIRECTS = 20;
+
+/**
+ * Headers safe to forward across an origin-changing redirect. Everything else —
+ * including `Authorization`, `Cookie`, `Proxy-Authorization`, and any custom
+ * (potentially secret) headers — is dropped when a redirect leaves the original
+ * origin.
+ */
+const SAFE_CROSS_ORIGIN_HEADERS = new Set([
+  "accept",
+  "accept-encoding",
+  "range",
+  "user-agent",
+  "content-type",
+  "content-length",
+]);
+
+function safelistHeaders(headers: Headers): Headers {
+  const result = new Headers();
+  for (const [key, value] of headers) {
+    if (SAFE_CROSS_ORIGIN_HEADERS.has(key.toLowerCase())) {
+      result.set(key, value);
+    }
+  }
+  return result;
+}
+
+function isRedirectStatus(status: number): boolean {
+  return status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
 }
 
 function computeExpiry(body: TokenResponse): number | undefined {

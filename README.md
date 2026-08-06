@@ -207,6 +207,26 @@ separate so the core library stays free of Sigstore-specific surface area.
 - **Docker Hub canonicalization.** `docker.io`, `index.docker.io`, and
   `registry.hub.docker.com` are canonicalized to `registry-1.docker.io`.
 
+## Security
+
+Credentials are only ever sent to the registry host they belong to:
+
+- **Exact-host credential selection.** All credential providers select by exact
+  host match (after canonicalization), never a substring match, so credentials
+  configured for `ghcr.io` are never offered to `ghcr.io.evil.example` or
+  `cr.io`.
+- **No client-wide credential defaults.** Tokens are attached per request, keyed
+  by the target URL's host. A request to a host the client learned from a server
+  response — e.g. a blob-upload `Location` pointing at a separate storage host —
+  is sent **without** the registry token or any custom registry headers.
+- **Origin-safe redirects.** Redirects are followed manually; when a redirect
+  changes origin, `Authorization`, cookies, and any non-safelisted (custom)
+  headers are stripped, and the request body is never replayed to a different
+  origin during token exchange. (Node's `fetch` strips `Authorization` on
+  cross-origin redirects but not custom headers or request bodies.)
+- **Digest verification.** Blobs and digest-referenced manifests are verified
+  against their digests (`DigestMismatchError` on mismatch).
+
 ## API overview
 
 | Area | Entry points |

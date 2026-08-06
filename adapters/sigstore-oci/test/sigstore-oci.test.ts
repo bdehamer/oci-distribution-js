@@ -117,6 +117,11 @@ test("getRegistryCredentials reads the docker config for the registry", () => {
     const creds = getRegistryCredentials("ghcr.io/owner/repo");
     assert.equal(creds.username, "alice");
     assert.equal(creds.password, "s3cret");
+
+    // GHSA-pf56: credentials for ghcr.io must NOT be selected for a different
+    // registry whose host merely contains the configured key as a substring.
+    assert.throws(() => getRegistryCredentials("ghcr.io.evil.example/owner/repo"));
+    assert.throws(() => getRegistryCredentials("cr.io/owner/repo"));
   } finally {
     if (prevHome === undefined) {
       delete process.env.HOME;

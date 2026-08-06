@@ -23,7 +23,12 @@ interface Ctx {
   registry: Registry;
   name: string;
   path(sub: string): string;
-  do(ref: string, init: RequestInit, scopes: string[]): Promise<Response>;
+  do(
+    ref: string,
+    init: RequestInit,
+    scopes: string[],
+    options?: { authenticate?: boolean },
+  ): Promise<Response>;
   pullScope: string;
   pushScope: string;
   deleteScope: string;
@@ -131,7 +136,7 @@ export class Repository {
       registry,
       name,
       path: (sub) => `/v2/${name}${sub}`,
-      do: (ref, init, scopes) => registry.do(ref, init, scopes),
+      do: (ref, init, scopes, options) => registry.do(ref, init, scopes, options),
       pullScope: scopeRepository(name, [ACTION_PULL]),
       pushScope: scopeRepository(name, [ACTION_PUSH, ACTION_PULL]),
       deleteScope: scopeRepository(name, [ACTION_DELETE]),
@@ -352,6 +357,11 @@ export class BlobStore {
     }
 
     const putUrl = addQuery(this.#ctx.registry.resolveUrl(location), "digest", digest);
+    // If the registry offloaded the upload to a different host (a common
+    // pattern with pre-signed storage URLs), send the blob there WITHOUT any
+    // registry credentials — the host came from a server response and must not
+    // receive the registry token or credential headers.
+    const crossHost = safeHost(putUrl) !== this.#ctx.registry.host;
     const put = await this.#ctx.do(
       putUrl,
       {
@@ -359,7 +369,8 @@ export class BlobStore {
         headers: { "content-type": "application/octet-stream", "content-length": String(size) },
         body: data,
       },
-      [this.#ctx.pushScope],
+      crossHost ? [] : [this.#ctx.pushScope],
+      crossHost ? { authenticate: false } : undefined,
     );
     if (put.status !== 201) {
       throw await ResponseError.fromResponse(put, "PUT");
@@ -853,6 +864,14 @@ function addQuery(url: string, key: string, value: string): string {
   const parsed = new URL(url);
   parsed.searchParams.set(key, value);
   return parsed.toString();
+}
+
+function safeHost(url: string): string | null {
+  try {
+    return new URL(url).host;
+  } catch {
+    return null;
+  }
 }
 
 function parseNextLink(header: string | null): string | null {

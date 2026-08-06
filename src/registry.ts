@@ -1,4 +1,4 @@
-import { AuthClient, type AuthClientOptions, type FetchLike } from "./auth/client.ts";
+import { AuthClient, type AuthClientOptions, type DoOptions, type FetchLike } from "./auth/client.ts";
 import type { AuthCache } from "./auth/cache.ts";
 import { normalizeRegistry, type CredentialProvider } from "./auth/credentials.ts";
 import type { RetryOptions } from "./retry.ts";
@@ -84,15 +84,32 @@ export class Registry {
    * Performs an authenticated request against this registry. `ref` may be an
    * absolute URL or a path (e.g. `/v2/...`); `scopes` are authorization scope
    * hints used to pre-authenticate the request.
+   *
+   * The registry's default headers are attached only when the resolved target
+   * host matches this registry's host, so credential-bearing custom headers are
+   * never sent to a different host named by a server response. Pass
+   * `options.authenticate = false` to send a request with no credentials at all.
    */
-  do(ref: string, init: RequestInit = {}, scopes: string[] = []): Promise<Response> {
-    const headers = new Headers(this.#headers);
+  do(
+    ref: string,
+    init: RequestInit = {},
+    scopes: string[] = [],
+    options: { authenticate?: boolean } = {},
+  ): Promise<Response> {
+    const resolved = this.resolveUrl(ref);
+    const sameHost = safeHost(resolved) === this.host;
+    // Only attach registry-scoped default headers to the registry's own host.
+    const headers = new Headers(sameHost ? this.#headers : undefined);
     if (init.headers) {
       for (const [key, value] of new Headers(init.headers)) {
         headers.set(key, value);
       }
     }
-    return this.#auth.do(this.resolveUrl(ref), { ...init, headers }, { scopes });
+    const doOptions: DoOptions = { scopes };
+    if (options.authenticate !== undefined) {
+      doOptions.authenticate = options.authenticate;
+    }
+    return this.#auth.do(resolved, { ...init, headers }, doOptions);
   }
 
   /** Creates a {@link Repository} within this registry. */
@@ -138,4 +155,12 @@ function splitHost(input: string): HostParts {
 function isLoopback(host: string): boolean {
   const name = host.replace(/:\d+$/, "").toLowerCase();
   return name === "localhost" || name === "127.0.0.1" || name === "::1" || name === "[::1]";
+}
+
+function safeHost(url: string): string | null {
+  try {
+    return new URL(url).host;
+  } catch {
+    return null;
+  }
 }
