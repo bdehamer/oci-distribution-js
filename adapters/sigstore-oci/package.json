@@ -5,6 +5,11 @@
   "private": true,
   "type": "module",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bdehamer/oci-distribution-js.git",
+    "directory": "adapters/sigstore-oci"
+  },
   "engines": {
     "node": "^22.22.2 || ^24.15.0 || >=26.0.0"
   },

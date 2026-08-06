@@ -1,6 +1,6 @@
 {
   "name": "oci-distribution",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A zero-dependency TypeScript client for the OCI Distribution Specification.",
   "keywords": [
     "oci",
@@ -12,6 +12,14 @@
     "oras"
   ],
   "license": "Apache-2.0",
+  "homepage": "https://github.com/bdehamer/oci-distribution-js#readme",
+  "bugs": {
+    "url": "https://github.com/bdehamer/oci-distribution-js/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bdehamer/oci-distribution-js.git"
+  },
   "type": "module",
   "engines": {
     "node": "^22.22.2 || ^24.15.0 || >=26.0.0"
