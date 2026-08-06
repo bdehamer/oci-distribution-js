@@ -1,0 +1,16 @@
+# Keeps the SHA-pinned GitHub Actions in .github/workflows up to date. Dependabot
+# opens PRs that bump both the pinned commit SHA and its version comment when a
+# new release is published, so pinning stays current with security fixes.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+    # Batch all action bumps into a single PR to reduce noise.
+    groups:
+      github-actions:
+        patterns:
+          - "*"
