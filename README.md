@@ -11,6 +11,9 @@ HTTP basic, and Docker config files).
   content management (deletion).
 - **Standard auth.** Token challenge (`WWW-Authenticate`), OAuth2 refresh-token
   grant, HTTP basic, and `~/.docker/config.json` (including credential helpers).
+- **Resilient.** Automatic retry/backoff for transient failures, Docker Hub host
+  canonicalization, and referrers handling that copes with registries (like AWS
+  ECR) that report a subject but don't implement the referrers API.
 - **OCI 1.1 artifacts.** First-class `subject`/referrers support, so it can be
   used as the foundation for artifact specs such as the
   [Sigstore cosign bundle spec][bundle-spec] (see [below](#building-on-top-the-sigstore-bundle-spec)).
@@ -178,11 +181,31 @@ const { manifest } = await repo.getManifest(index.manifests[0].digest);
 const bundle = await repo.blobs.get((manifest as ImageManifest).layers[0].digest);
 ```
 
-`attachArtifact` / `packManifest` honor the `OCI-Subject` response header and
-automatically fall back to maintaining the [referrers tag-schema][tag-schema]
-index when a registry does not support the referrers API — and `referrers.list`
-transparently falls back on the read side — so the same code works on registries
-regardless of referrers-API support.
+`attachArtifact` / `packManifest` honor the `OCI-Subject` response header and,
+by default, probe the referrers API (`repo.referrers.ping()`) so they can fall
+back to maintaining the [referrers tag-schema][tag-schema] index when a registry
+does not truly support it — including registries such as **AWS ECR** that return
+an `OCI-Subject` header without implementing the referrers API. `referrers.list`
+transparently falls back on the read side too, so the same code works on
+registries regardless of referrers-API support. Set `checkReferrersApi: false`
+to skip the probe, or `forceReferrersTag: true` to always maintain the tag index.
+
+### A ready-made `@sigstore/oci` adapter
+
+A thin adapter that exposes the exact public API of
+[`@sigstore/oci`](https://github.com/sigstore/sigstore-js/tree/main/packages/oci)
+(`attachArtifactToImage`, `getImageDigest`, `getRegistryCredentials`) on top of
+this client lives in [`adapters/sigstore-oci`](./adapters/sigstore-oci) — kept
+separate so the core library stays free of Sigstore-specific surface area.
+
+## Reliability
+
+- **Retries.** Transient failures (network errors and `429`/`5xx` responses) are
+  retried with exponential backoff and jitter, honoring `Retry-After`. Configure
+  or disable via the `retry` option: `new Registry(host, { retry: { maxRetries: 5 } })`
+  or `{ retry: false }`. Requests with streaming bodies are never retried.
+- **Docker Hub canonicalization.** `docker.io`, `index.docker.io`, and
+  `registry.hub.docker.com` are canonicalized to `registry-1.docker.io`.
 
 ## API overview
 

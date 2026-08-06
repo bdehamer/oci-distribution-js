@@ -11,6 +11,11 @@ import type { AddressInfo } from "node:net";
 export interface MockRegistryOptions {
   /** Enable the referrers API. When false, `/referrers/` returns 404. */
   referrersApi?: boolean;
+  /**
+   * Emulate AWS ECR: set the `OCI-Subject` header on manifest push, yet return
+   * 404 from the referrers API (so a correct client must use the tag schema).
+   */
+  emulateEcr?: boolean;
   /** Require a bearer token obtained from the built-in token endpoint. */
   requireAuth?: boolean;
   /** Page size that forces `Link`-header pagination for tag listing. */
@@ -42,7 +47,10 @@ export interface MockRegistry {
 const TOKEN = "mock-access-token";
 
 export async function createMockRegistry(options: MockRegistryOptions = {}): Promise<MockRegistry> {
-  const referrersApi = options.referrersApi ?? true;
+  const emulateEcr = options.emulateEcr ?? false;
+  // ECR sets the OCI-Subject header on push but does NOT serve the referrers API.
+  const referrersApiServed = (options.referrersApi ?? true) && !emulateEcr;
+  const setsSubjectHeader = (options.referrersApi ?? true) || emulateEcr;
   const requireAuth = options.requireAuth ?? false;
   const repos = new Map<string, RepoState>();
   const uploads = new Map<string, string>(); // uploadId -> repo name
@@ -222,7 +230,10 @@ export async function createMockRegistry(options: MockRegistryOptions = {}): Pro
 
       const parsed = safeJSON(body);
       const subject = parsed?.subject?.digest;
-      if (subject && referrersApi) {
+      if (subject && setsSubjectHeader) {
+        res.setHeader("oci-subject", subject);
+      }
+      if (subject && referrersApiServed) {
         const list = state.referrers.get(subject) ?? [];
         const descriptor: Descriptor = { mediaType: contentType, digest, size: body.byteLength };
         const artifactType = parsed?.artifactType ?? parsed?.config?.mediaType;
@@ -232,7 +243,6 @@ export async function createMockRegistry(options: MockRegistryOptions = {}): Pro
           list.push(descriptor);
         }
         state.referrers.set(subject, list);
-        res.setHeader("oci-subject", subject);
       }
       empty(res, 201);
       return;
@@ -261,7 +271,7 @@ export async function createMockRegistry(options: MockRegistryOptions = {}): Pro
   }
 
   function handleReferrers(name: string, subject: string, url: URL, res: ServerResponse): void {
-    if (!referrersApi) {
+    if (!referrersApiServed) {
       empty(res, 404);
       return;
     }

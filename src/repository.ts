@@ -57,6 +57,12 @@ export interface ManifestPushOptions {
    * Defaults to `true`.
    */
   updateReferrers?: boolean;
+  /**
+   * Force updating the referrers tag-schema index even when the registry does
+   * return an `OCI-Subject` header. Needed for registries such as AWS ECR that
+   * report a subject but do not actually implement the referrers API.
+   */
+  forceReferrersTag?: boolean;
 }
 
 /** Options for listing tags. */
@@ -87,6 +93,19 @@ export interface PackManifestOptions {
   annotations?: Record<string, string>;
   /** An optional tag to apply to the pushed manifest. */
   tag?: string;
+  /**
+   * When a subject is present, probe the referrers API (see
+   * {@link ReferrerStore.ping}) and fall back to maintaining the referrers
+   * tag-schema index when it is unsupported. Defaults to `true`; this costs one
+   * extra request but is required for correctness on registries like AWS ECR
+   * that return an `OCI-Subject` header without supporting the referrers API.
+   */
+  checkReferrersApi?: boolean;
+  /**
+   * Force (or suppress) the referrers tag-schema update regardless of API
+   * support. When set, {@link checkReferrersApi} is not consulted.
+   */
+  forceReferrersTag?: boolean;
 }
 
 /**
@@ -189,6 +208,15 @@ export class Repository {
     const pushOptions: ManifestPushOptions = { mediaType: MEDIA_TYPE_OCI_IMAGE_MANIFEST };
     if (options.artifactType) {
       pushOptions.artifactType = options.artifactType;
+    }
+    if (manifest.subject) {
+      if (options.forceReferrersTag !== undefined) {
+        pushOptions.forceReferrersTag = options.forceReferrersTag;
+      } else if (options.checkReferrersApi !== false) {
+        // Probe the referrers API; if unsupported, force the tag-schema update
+        // even when the registry reports an OCI-Subject header (e.g. AWS ECR).
+        pushOptions.forceReferrersTag = !(await this.referrers.ping());
+      }
     }
     return this.manifests.push(options.tag, data, pushOptions);
   }
@@ -505,7 +533,11 @@ export class ManifestStore {
     }
 
     const subject = parsed?.subject;
-    if (subject && !ociSubject && options.updateReferrers !== false) {
+    if (
+      subject &&
+      options.updateReferrers !== false &&
+      (options.forceReferrersTag === true || !ociSubject)
+    ) {
       await this.#appendReferrer(subject.digest, buildReferrerDescriptor(descriptor, parsed));
     }
 
@@ -691,9 +723,30 @@ export class ReferrerStore {
     const manifests = Array.isArray(index.manifests) ? index.manifests : [];
     return buildIndex(filterByArtifactType(manifests, artifactType));
   }
+
+  /**
+   * Probes whether the registry supports the referrers API, by requesting the
+   * referrers of the all-zero digest and checking for a `200` response. This is
+   * the reliable way to detect support: some registries (notably AWS ECR)
+   * return an `OCI-Subject` header on manifest push without actually serving the
+   * referrers API.
+   */
+  async ping(): Promise<boolean> {
+    const response = await this.#ctx.do(
+      this.#ctx.path(`/referrers/${ZERO_DIGEST}`),
+      { method: "GET", headers: { accept: MEDIA_TYPE_OCI_IMAGE_INDEX } },
+      [this.#ctx.pullScope],
+    );
+    const supported = response.status === 200;
+    await drain(response);
+    return supported;
+  }
 }
 
 // --- module-scope helpers ---
+
+/** The all-zero sha256 digest, used to probe referrers API support. */
+const ZERO_DIGEST = `sha256:${"0".repeat(64)}`;
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();

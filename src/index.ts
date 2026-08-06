@@ -36,6 +36,9 @@ export type {
 // Media types
 export * from "./media-types.ts";
 
+// Retry
+export { withRetry, type RetryOptions } from "./retry.ts";
+
 // Digest utilities
 export {
   calculateDigest,

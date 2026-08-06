@@ -1,6 +1,7 @@
 import { AuthClient, type AuthClientOptions, type FetchLike } from "./auth/client.ts";
 import type { AuthCache } from "./auth/cache.ts";
-import type { CredentialProvider } from "./auth/credentials.ts";
+import { normalizeRegistry, type CredentialProvider } from "./auth/credentials.ts";
+import type { RetryOptions } from "./retry.ts";
 import { isValidRepository } from "./reference.ts";
 import { Repository } from "./repository.ts";
 
@@ -29,6 +30,11 @@ export interface RegistryOptions {
   headers?: Headers | Record<string, string>;
   /** A shared auth cache. A fresh one is created when omitted. */
   cache?: AuthCache;
+  /**
+   * Retry configuration for transient failures. Pass `false` to disable.
+   * Defaults to retrying network errors and `429`/`5xx` responses.
+   */
+  retry?: RetryOptions | false;
 }
 
 /**
@@ -45,8 +51,10 @@ export class Registry {
 
   constructor(host: string, options: RegistryOptions = {}) {
     const parsed = splitHost(host);
-    this.host = parsed.host;
-    const plain = options.plainHTTP ?? parsed.plainHTTP ?? isLoopback(parsed.host);
+    // Canonicalize Docker Hub aliases (docker.io, index.docker.io, ...) to the
+    // real API endpoint (registry-1.docker.io).
+    this.host = normalizeRegistry(parsed.host);
+    const plain = options.plainHTTP ?? parsed.plainHTTP ?? isLoopback(this.host);
     this.scheme = plain ? "http" : "https";
     this.#headers = new Headers(options.headers);
 
@@ -58,6 +66,7 @@ export class Registry {
     if (options.clientId !== undefined) authOptions.clientId = options.clientId;
     if (options.forceOAuth2 !== undefined) authOptions.forceOAuth2 = options.forceOAuth2;
     if (options.cache !== undefined) authOptions.cache = options.cache;
+    if (options.retry !== undefined) authOptions.retry = options.retry;
     this.#auth = new AuthClient(authOptions);
   }
 

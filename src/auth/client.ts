@@ -9,6 +9,7 @@ import {
   type CredentialProvider,
 } from "./credentials.ts";
 import { RegistryError, ResponseError } from "../errors.ts";
+import { withRetry, type RetryOptions } from "../retry.ts";
 import type { TokenResponse } from "../types.ts";
 
 /** A `fetch`-compatible function. Defaults to the global `fetch`. */
@@ -37,6 +38,11 @@ export interface AuthClientOptions {
   forceOAuth2?: boolean;
   /** Token/scheme cache. A fresh {@link AuthCache} is used when omitted. */
   cache?: AuthCache;
+  /**
+   * Retry configuration for transient failures. Pass `false` to disable
+   * retries. Defaults to retrying network errors and `429`/`5xx` responses.
+   */
+  retry?: RetryOptions | false;
 }
 
 /** Per-request options for {@link AuthClient.do}. */
@@ -66,8 +72,8 @@ export class AuthClient {
 
   constructor(options: AuthClientOptions = {}) {
     this.#credentials = options.credentials ?? (() => EMPTY_CREDENTIAL);
-    const fetchImpl = options.fetch ?? ((input: string | URL, init?: RequestInit) => fetch(input, init));
-    this.#fetch = fetchImpl;
+    const baseFetch = options.fetch ?? ((input: string | URL, init?: RequestInit) => fetch(input, init));
+    this.#fetch = options.retry === false ? baseFetch : withRetry(baseFetch, options.retry ?? {});
     this.#userAgent = options.userAgent;
     this.#clientId = options.clientId ?? DEFAULT_CLIENT_ID;
     this.#forceOAuth2 = options.forceOAuth2 ?? false;
