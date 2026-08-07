@@ -63,6 +63,11 @@ interface BearerToken {
   expiresAt?: number;
 }
 
+/** Out-parameter for {@link AuthClient.send}: the URL of the final hop. */
+interface SendTrace {
+  finalUrl?: string;
+}
+
 /**
  * An HTTP transport that transparently authenticates requests to OCI
  * registries. It attaches cached credentials up front and, on a `401`, parses
@@ -137,13 +142,18 @@ export class AuthClient {
       }
     }
 
-    const response = await this.#send(url, { ...init, headers });
+    const trace: SendTrace = {};
+    const response = await this.#send(url, { ...init, headers }, { trace });
     if (response.status !== 401) {
       return response;
     }
 
-    // Only surrender credentials to the origin we intended to talk to.
-    if (safeOrigin(response.url) !== null && safeOrigin(response.url) !== origin) {
+    // Only surrender credentials to the origin we intended to talk to. Fail
+    // closed: if the responding origin is unknown (no final URL) or differs from
+    // the target origin — e.g. a 401 served from a host reached via redirect —
+    // do not negotiate or attach credentials.
+    const responseOrigin = safeOrigin(trace.finalUrl ?? "");
+    if (responseOrigin === null || responseOrigin !== origin) {
       return response;
     }
 
@@ -172,6 +182,12 @@ export class AuthClient {
     // Bearer
     const realm = challenge.params["realm"];
     if (!realm) {
+      return response;
+    }
+    // Refuse to hand credentials to a token endpoint that is not HTTPS (unless
+    // it is loopback, for local/test registries). Blocks a malicious registry
+    // from steering the Basic/OAuth2 credential to an http://attacker/token realm.
+    if (!isSecureTokenEndpoint(realm)) {
       return response;
     }
     const service = challenge.params["service"] ?? "";
@@ -214,7 +230,7 @@ export class AuthClient {
   async #send(
     url: string,
     init: RequestInit,
-    options: { refuseCrossOriginRedirect?: boolean } = {},
+    options: { refuseCrossOriginRedirect?: boolean; trace?: SendTrace } = {},
   ): Promise<Response> {
     const originalOrigin = new URL(url).origin;
     let current = url;
@@ -236,6 +252,9 @@ export class AuthClient {
       });
 
       if (!isRedirectStatus(response.status)) {
+        if (options.trace) {
+          options.trace.finalUrl = current;
+        }
         return response;
       }
       if (redirects >= MAX_REDIRECTS) {
@@ -428,6 +447,29 @@ function safeOrigin(url: string): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Returns true if a token-endpoint (`realm`) URL is safe to send credentials to:
+ * HTTPS always, or plain HTTP only for loopback hosts (local/test registries).
+ * Prevents a malicious registry from directing the Basic/OAuth2 credential to a
+ * plaintext `http://attacker/token` endpoint.
+ */
+function isSecureTokenEndpoint(realm: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(realm);
+  } catch {
+    return false;
+  }
+  if (url.protocol === "https:") {
+    return true;
+  }
+  if (url.protocol === "http:") {
+    const host = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+    return host === "localhost" || host === "127.0.0.1" || host === "::1";
+  }
+  return false;
 }
 
 async function drain(response: Response): Promise<void> {

@@ -400,10 +400,13 @@ export class BlobStore {
       await drain(response);
       if (location) {
         try {
+          const cancelUrl = this.#ctx.registry.resolveUrl(location);
+          const auth = serverNamedRequest(this.#ctx, cancelUrl, [this.#ctx.pushScope]);
           const cancel = await this.#ctx.do(
-            this.#ctx.registry.resolveUrl(location),
+            cancelUrl,
             { method: "DELETE" },
-            [this.#ctx.pushScope],
+            auth.scopes,
+            auth.options,
           );
           await drain(cancel);
         } catch {
@@ -635,12 +638,16 @@ export class TagStore {
   /** Lists all tags, following `Link` pagination. */
   async listAll(pageSize?: number): Promise<string[]> {
     const tags: string[] = [];
-    let next: string | null = this.#ctx.path(`/tags/list${pageSize ? `?n=${pageSize}` : ""}`);
+    let next: string | null = this.#ctx.registry.resolveUrl(
+      this.#ctx.path(`/tags/list${pageSize ? `?n=${pageSize}` : ""}`),
+    );
     while (next) {
+      const auth = serverNamedRequest(this.#ctx, next, [this.#ctx.pullScope]);
       const response = await this.#ctx.do(
         next,
         { method: "GET", headers: { accept: "application/json" } },
-        [this.#ctx.pullScope],
+        auth.scopes,
+        auth.options,
       );
       if (!response.ok) {
         throw await ResponseError.fromResponse(response, "GET");
@@ -698,10 +705,13 @@ export class ReferrerStore {
       if (!link) {
         break;
       }
+      const pageUrl = this.#ctx.registry.resolveUrl(link);
+      const auth = serverNamedRequest(this.#ctx, pageUrl, [this.#ctx.pullScope]);
       response = await this.#ctx.do(
-        this.#ctx.registry.resolveUrl(link),
+        pageUrl,
         { method: "GET", headers: { accept: MEDIA_TYPE_OCI_IMAGE_INDEX } },
-        [this.#ctx.pullScope],
+        auth.scopes,
+        auth.options,
       );
       if (!response.ok) {
         throw await ResponseError.fromResponse(response, "GET");
@@ -853,7 +863,11 @@ function ensureDigest(data: Uint8Array, digest: string): void {
   const { algorithm } = parseDigest(digest);
   const actual = tryComputeDigest(data, algorithm);
   if (actual === undefined) {
-    return; // algorithm unsupported by the runtime; cannot verify
+    // Fail closed: the runtime cannot compute this digest algorithm, so we
+    // cannot verify integrity. Refuse the content rather than trusting it.
+    throw new RegistryError(
+      `cannot verify digest: unsupported algorithm ${JSON.stringify(algorithm)}`,
+    );
   }
   if (actual !== digest) {
     throw new DigestMismatchError(digest, actual);
@@ -872,6 +886,25 @@ function safeHost(url: string): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Computes the `do()` scopes and options for a request to a URL taken from a
+ * server response (a mount-cancel `Location`, or a `Link` pagination target).
+ * When the URL points at a host other than the registry's own, the request is
+ * sent unauthenticated (`authenticate: false`, no scopes) so registry
+ * credentials and headers are never handed to a host named by the server.
+ * Same-host URLs are authenticated with `sameHostScopes`.
+ */
+function serverNamedRequest(
+  ctx: Ctx,
+  url: string,
+  sameHostScopes: string[],
+): { scopes: string[]; options: { authenticate: boolean } | undefined } {
+  if (safeHost(url) !== ctx.registry.host) {
+    return { scopes: [], options: { authenticate: false } };
+  }
+  return { scopes: sameHostScopes, options: undefined };
 }
 
 function parseNextLink(header: string | null): string | null {

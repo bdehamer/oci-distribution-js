@@ -244,11 +244,24 @@ function decodeAuthEntry(entry: AuthEntry): Credential {
   return cred;
 }
 
+/**
+ * Characters permitted in a credential-helper name. Docker resolves a helper by
+ * executing `docker-credential-<name>`; the Docker CLI does not validate this
+ * suffix (it trusts the config file), but because this provider may read an
+ * untrusted config, the name is restricted here so it can never contain `/`
+ * (which would turn the executable name into a relative/absolute path) or other
+ * characters that alter path resolution.
+ */
+const HELPER_NAME_RE = /^[A-Za-z0-9._-]+$/;
+
 async function tryHelper(
   runHelper: HelperRunner,
   helper: string,
   serverURL: string,
 ): Promise<Credential | undefined> {
+  if (!HELPER_NAME_RE.test(helper)) {
+    return undefined; // never spawn a helper whose name could alter path resolution
+  }
   let result: HelperResult | undefined;
   try {
     result = await runHelper(helper, serverURL);

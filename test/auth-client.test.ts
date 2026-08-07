@@ -194,3 +194,84 @@ test("a caller-provided Authorization header is left untouched", async () => {
   assert.equal(calls.length, 1);
   assert.equal(calls[0]!.headers.get("authorization"), "Bearer preset");
 });
+
+// --- L-2: fail-closed 401 origin guard (credentials must not follow a redirect) ---
+
+test("does not offer credentials to a 401 served from a cross-origin redirect host", async () => {
+  const { fetch, calls } = recordingFetch((req) => {
+    if (req.url === RESOURCE) {
+      return new Response("", { status: 307, headers: { location: "https://evil.example/steal" } });
+    }
+    if (req.url.startsWith("https://evil.example/token")) {
+      return new Response(JSON.stringify({ token: "abc" }), { status: 200 });
+    }
+    // The cross-origin host issues a bearer challenge of its own.
+    return new Response("", {
+      status: 401,
+      headers: {
+        "www-authenticate":
+          'Bearer realm="https://evil.example/token",service="svc",scope="repository:foo:pull"',
+      },
+    });
+  });
+
+  const client = new AuthClient({ fetch, credentials: () => ({ username: "u", password: "p" }) });
+  const res = await client.do(RESOURCE, { method: "GET" }, { scopes: ["repository:foo:pull"] });
+
+  assert.equal(res.status, 401, "the cross-origin 401 should be surfaced, not challenged");
+  assert.equal(
+    calls.filter((c) => c.url.includes("evil.example/token")).length,
+    0,
+    "no token request (and no credentials) should reach the cross-origin host",
+  );
+  const evilReq = calls.find((c) => c.url.startsWith("https://evil.example/steal"));
+  assert.ok(evilReq);
+  assert.equal(evilReq.headers.get("authorization"), null, "no Authorization across origins");
+});
+
+// --- Info-1: require an https (or loopback) token endpoint ---
+
+test("refuses to send credentials to a non-HTTPS (non-loopback) token endpoint", async () => {
+  const { fetch, calls } = recordingFetch((req) => {
+    if (req.url.startsWith("http://attacker.example/token")) {
+      return new Response(JSON.stringify({ token: "abc" }), { status: 200 });
+    }
+    if (req.headers.get("authorization")) {
+      return new Response("ok", { status: 200 });
+    }
+    return new Response("", {
+      status: 401,
+      headers: {
+        "www-authenticate":
+          'Bearer realm="http://attacker.example/token",service="svc",scope="repository:foo:pull"',
+      },
+    });
+  });
+
+  const client = new AuthClient({ fetch, credentials: () => ({ username: "u", password: "p" }) });
+  const res = await client.do(RESOURCE, { method: "GET" }, { scopes: ["repository:foo:pull"] });
+
+  assert.equal(res.status, 401, "a challenge to an http realm must be refused");
+  assert.equal(
+    calls.filter((c) => c.url.includes("attacker.example")).length,
+    0,
+    "no token request (and no credentials) should reach the http realm",
+  );
+});
+
+test("still uses an https token endpoint on a different host (Docker Hub pattern)", async () => {
+  const { fetch, calls } = recordingFetch((req) => {
+    if (req.url.startsWith("https://auth.example/token")) {
+      return new Response(JSON.stringify({ token: "abc" }), { status: 200 });
+    }
+    if (req.headers.get("authorization")) {
+      return new Response("ok", { status: 200 });
+    }
+    return bearerChallenge();
+  });
+
+  const client = new AuthClient({ fetch, credentials: () => ({ username: "u", password: "p" }) });
+  const res = await client.do(RESOURCE, { method: "GET" }, { scopes: ["repository:foo:pull"] });
+  assert.equal(res.status, 200, "a cross-host https realm remains allowed");
+  assert.ok(calls.some((c) => c.url.startsWith("https://auth.example/token")));
+});
