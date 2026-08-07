@@ -146,3 +146,44 @@ test("HttpHeaders from the docker config are sent to the registry host", async (
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// --- M-1: credential-helper name validation (attacker-influenced config) ---
+
+test("rejects a credsStore name containing a path separator without spawning", async () => {
+  const configPath = writeConfig({ credsStore: "x/../../../../bin/echo" });
+  let called = false;
+  const runHelper = async (): Promise<HelperResult> => {
+    called = true;
+    return { Username: "u", Secret: "p" };
+  };
+  const provider = dockerConfigCredential({ configPath, runHelper });
+  assert.deepEqual(await provider("ghcr.io"), {}, "invalid helper name yields anonymous access");
+  assert.equal(called, false, "an invalid helper name must never be executed");
+  rmSync(join(configPath, ".."), { recursive: true, force: true });
+});
+
+test("rejects a credHelpers name containing a slash without spawning", async () => {
+  const configPath = writeConfig({ credHelpers: { "ghcr.io": "sub/evil" } });
+  let called = false;
+  const runHelper = async (): Promise<HelperResult> => {
+    called = true;
+    return { Username: "u", Secret: "p" };
+  };
+  const provider = dockerConfigCredential({ configPath, runHelper });
+  assert.deepEqual(await provider("ghcr.io"), {});
+  assert.equal(called, false, "an invalid helper name must never be executed");
+  rmSync(join(configPath, ".."), { recursive: true, force: true });
+});
+
+test("a valid helper name (alnum/._-) is still executed", async () => {
+  const configPath = writeConfig({ credHelpers: { "ghcr.io": "ecr-login" } });
+  let called = false;
+  const runHelper = async (): Promise<HelperResult> => {
+    called = true;
+    return { Username: "u", Secret: "p" };
+  };
+  const provider = dockerConfigCredential({ configPath, runHelper });
+  assert.deepEqual(await provider("ghcr.io"), { username: "u", password: "p" });
+  assert.equal(called, true, "a well-formed helper name must still run");
+  rmSync(join(configPath, ".."), { recursive: true, force: true });
+});

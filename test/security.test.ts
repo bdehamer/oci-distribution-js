@@ -239,3 +239,97 @@ test("a cross-origin redirect from the token endpoint is refused (no credential 
     await Promise.all([registry.close(), attacker.close()]);
   }
 });
+
+// --- M-2: digest verification fails closed for an uncomputable algorithm ---
+
+test("blob get fails closed for a digest whose algorithm cannot be verified", async () => {
+  const payload = Buffer.from("unverifiable bytes");
+  const server = await startServer((req, res) => {
+    res.statusCode = 200;
+    res.end(payload);
+  });
+  try {
+    const repo = new Registry(server.host).repository("lib/app");
+    // 'blake3' is a syntactically valid digest algorithm that Node's crypto
+    // cannot compute, so integrity cannot be verified.
+    const digest = `blake3:${"0".repeat(64)}`;
+    await assert.rejects(
+      () => repo.blobs.get(digest),
+      (err: unknown) =>
+        err instanceof RegistryError && /unsupported algorithm/.test(String((err as Error).message)),
+      "must throw rather than return unverified bytes",
+    );
+  } finally {
+    await server.close();
+  }
+});
+
+// --- L-1: server-named cross-host Link pagination goes unauthenticated ---
+
+test("credentials are NOT sent to a cross-host Link pagination target (naive global provider)", async () => {
+  // A naive/global provider that ignores the host argument. This is the only
+  // condition under which an un-hardened pagination follow leaks: exact-host
+  // providers already withhold credentials from a foreign host. The attacker
+  // host also demands auth and offers a token endpoint, so an un-hardened client
+  // would negotiate and hand over the global credentials.
+  const globalProvider = () => ({ username: "u", password: "p" });
+
+  const attacker = await startServer(
+    registryHandler((req, res, self) => {
+      const url = new URL(req.url ?? "/", self.origin);
+      if (req.method === "GET" && url.pathname === "/v2/lib/app/tags/list") {
+        res.setHeader("content-type", "application/json");
+        res.statusCode = 200;
+        res.end(JSON.stringify({ name: "lib/app", tags: ["page2"] }));
+        return true;
+      }
+      return false;
+    }),
+  );
+  const registry = await startServer(
+    registryHandler((req, res, self) => {
+      const url = new URL(req.url ?? "/", self.origin);
+      if (req.method === "GET" && url.pathname === "/v2/lib/app/tags/list") {
+        // Offload the "next" page to a DIFFERENT host (attacker-controllable).
+        res.setHeader("link", `<${attacker.origin}/v2/lib/app/tags/list?page=2>; rel="next"`);
+        res.setHeader("content-type", "application/json");
+        res.statusCode = 200;
+        res.end(JSON.stringify({ name: "lib/app", tags: ["page1"] }));
+        return true;
+      }
+      return false;
+    }),
+  );
+
+  try {
+    const repo = new Registry(registry.host, {
+      credentials: globalProvider,
+      headers: { "x-secret-header": "leak-me" },
+    }).repository("lib/app");
+
+    // With the fix the cross-host page is fetched unauthenticated; because the
+    // attacker demands auth, pagination fails — that's fine, we only care that
+    // no credentials ever reached the attacker.
+    await repo.tags.listAll().catch(() => undefined);
+
+    for (const r of attacker.requests) {
+      assert.equal(
+        r.headers["authorization"],
+        undefined,
+        `no credentials should reach the attacker (${r.method} ${r.url})`,
+      );
+      assert.equal(r.headers["x-secret-header"], undefined, "must not leak custom headers");
+    }
+    assert.ok(
+      attacker.requests.some((r) => r.url.includes("/tags/list")),
+      "the attacker should have received the (unauthenticated) page fetch",
+    );
+    assert.equal(
+      attacker.requests.filter((r) => r.url.includes("/token")).length,
+      0,
+      "the attacker token endpoint must never be hit",
+    );
+  } finally {
+    await Promise.all([registry.close(), attacker.close()]);
+  }
+});
